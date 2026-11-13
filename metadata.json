@@ -1,0 +1,6 @@
+{
+  "name": "CityBuilder",
+  "description": "Interactive browser-based urban planning playground for designing streets, buildings, zoning, parks, and transit networks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
