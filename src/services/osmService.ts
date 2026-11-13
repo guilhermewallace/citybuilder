@@ -1,19 +1,52 @@
 import {
+  CITY_CATALOG,
+  DEFAULT_PUBLIC_OVERPASS_URL,
+  isLocalProxyOrLocalhostUrl,
+  resolveOverpassDataSource,
+} from '../data/cityCatalog';
+import {
   GeoBounds,
+  GeoOrigin,
   OsmImportCategories,
 } from '../types/city';
 import { computeBoundsMetrics } from '../utils/geoCoords';
 import { OverpassResponse } from '../utils/osmConverter';
 
+export const OVERPASS_TIMEOUT_MS = 30_000;
+export const OVERPASS_RETRY_DELAYS_MS = [2000, 4000, 8000] as const;
+export const RETRYABLE_HTTP_STATUSES = new Set([429, 502, 503, 504]);
+
+function readViteEnv(): Record<string, string | undefined> {
+  try {
+    return (
+      (import.meta.env as unknown as Record<string, string | undefined>) || {}
+    );
+  } catch {
+    return {};
+  }
+}
+
+function isViteDevMode(): boolean {
+  try {
+    return Boolean((import.meta.env as unknown as { DEV?: boolean })?.DEV);
+  } catch {
+    return false;
+  }
+}
+
+export function getConfiguredDefaultOverpassUrl(): string {
+  const envUrl = readViteEnv().VITE_OVERPASS_URL?.trim();
+  return envUrl || DEFAULT_PUBLIC_OVERPASS_URL;
+}
+
 export const OSM_SERVICE_CONFIG = {
   nominatimUrl: 'https://nominatim.openstreetmap.org/search',
-  overpassEndpoints: [
-    'https://overpass-api.de/api/interpreter',
-    'https://overpass.kumi.systems/api/interpreter',
-  ],
+  defaultOverpassUrl: DEFAULT_PUBLIC_OVERPASS_URL,
   tileUrlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
   attribution: '© OpenStreetMap contributors',
   minRequestIntervalMs: 1100,
+  timeoutMs: OVERPASS_TIMEOUT_MS,
+  retryDelaysMs: OVERPASS_RETRY_DELAYS_MS,
 };
 
 export interface LocationSearchResult {
@@ -25,52 +58,32 @@ export interface LocationSearchResult {
   type: string;
   country?: string;
   boundingBox?: GeoBounds;
+  cityCatalogId?: string;
 }
 
-export const PRESET_CITIES: LocationSearchResult[] = [
-  {
-    placeId: 'preset-teresina',
-    name: 'Teresina',
-    displayName: 'Teresina, Piauí, Brazil',
-    lat: -5.0892,
-    lon: -42.8016,
-    type: 'city',
-    country: 'Brazil',
-  },
-  {
-    placeId: 'preset-fortaleza',
-    name: 'Fortaleza',
-    displayName: 'Fortaleza, Ceará, Brazil',
-    lat: -3.7319,
-    lon: -38.5267,
-    type: 'city',
-    country: 'Brazil',
-  },
-  {
-    placeId: 'preset-saopaulo',
-    name: 'São Paulo',
-    displayName: 'São Paulo, Região Metropolitana de São Paulo, Brazil',
-    lat: -23.5505,
-    lon: -46.6333,
-    type: 'city',
-    country: 'Brazil',
-  },
-  {
-    placeId: 'preset-manhattan',
-    name: 'Manhattan',
-    displayName: 'Manhattan, New York County, New York, United States',
-    lat: 40.758,
-    lon: -73.9855,
-    type: 'borough',
-    country: 'United States',
-  },
-];
+export const PRESET_CITIES: LocationSearchResult[] = CITY_CATALOG.filter((c) =>
+  ['teresina', 'fortaleza', 'sao-paulo', 'new-york'].includes(c.id)
+).map((c) => ({
+  placeId: `preset-${c.id}`,
+  name: c.name,
+  displayName: `${c.name}, ${c.country}`,
+  lat: c.center.lat,
+  lon: c.center.lon,
+  type: 'city',
+  country: c.country,
+  boundingBox: c.bounds,
+  cityCatalogId: c.id,
+}));
 
 const searchCache = new Map<string, LocationSearchResult[]>();
-const overpassCache = new Map<string, OverpassResponse>();
+const overpassCache = new Map<
+  string,
+  { response: OverpassResponse; endpointUsed: string }
+>();
 let lastRequestTimestamp = 0;
 
-async function respectRateLimit(): Promise<void> {
+async function respectRateLimit(skipForLocal: boolean): Promise<void> {
+  if (skipForLocal) return;
   const now = Date.now();
   const elapsed = now - lastRequestTimestamp;
   if (elapsed < OSM_SERVICE_CONFIG.minRequestIntervalMs) {
@@ -81,6 +94,29 @@ async function respectRateLimit(): Promise<void> {
   lastRequestTimestamp = Date.now();
 }
 
+async function waitWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    throw signal.reason instanceof Error
+      ? signal.reason
+      : new DOMException('Request aborted', 'AbortError');
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(
+        signal?.reason instanceof Error
+          ? signal.reason
+          : new DOMException('Request aborted', 'AbortError')
+      );
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function fetchWithTimeout(
   input: string,
   init: RequestInit,
@@ -88,7 +124,16 @@ async function fetchWithTimeout(
   externalSignal?: AbortSignal
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('Request timed out')), timeoutMs);
+  const timer = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException(
+          `Request timed out after ${Math.round(timeoutMs / 1000)}s`,
+          'TimeoutError'
+        )
+      ),
+    timeoutMs
+  );
   const onExternalAbort = () => controller.abort(externalSignal?.reason);
   if (externalSignal) {
     if (externalSignal.aborted) {
@@ -117,7 +162,7 @@ export async function searchOsmLocations(
     return searchCache.get(cacheKey)!;
   }
 
-  await respectRateLimit();
+  await respectRateLimit(false);
 
   const url = new URL(OSM_SERVICE_CONFIG.nominatimUrl);
   url.searchParams.set('q', trimmed);
@@ -133,13 +178,15 @@ export async function searchOsmLocations(
         Accept: 'application/json',
       },
     },
-    8000,
+    10_000,
     signal
   );
 
   if (!res.ok) {
     if (res.status === 429) {
-      throw new Error('Geocoding rate limit reached. Please wait a moment and try again.');
+      throw new Error(
+        'Geocoding rate limit reached. Please wait a moment and try again.'
+      );
     }
     throw new Error(`Location search failed (HTTP ${res.status}).`);
   }
@@ -197,8 +244,12 @@ export function buildOverpassQuery(
     clauses.push(`  relation["building"](${bbox});`);
   }
   if (categories.natural) {
-    clauses.push(`  way["leisure"~"^(park|garden|playground|pitch|sports_centre|stadium|track|nature_reserve|common)$"](${bbox});`);
-    clauses.push(`  way["landuse"~"^(grass|forest|recreation_ground|meadow|village_green|reservoir)$"](${bbox});`);
+    clauses.push(
+      `  way["leisure"~"^(park|garden|playground|pitch|sports_centre|stadium|track|nature_reserve|common)$"](${bbox});`
+    );
+    clauses.push(
+      `  way["landuse"~"^(grass|forest|recreation_ground|meadow|village_green|reservoir)$"](${bbox});`
+    );
     clauses.push(`  way["place"="square"](${bbox});`);
     clauses.push(`  way["natural"="water"](${bbox});`);
     clauses.push(`  way["waterway"~"^(river|stream|canal)$"](${bbox});`);
@@ -209,17 +260,65 @@ export function buildOverpassQuery(
     clauses.push(`  node["public_transport"="platform"]["bus"="yes"](${bbox});`);
     clauses.push(`  node["amenity"="bus_station"](${bbox});`);
     clauses.push(`  node["railway"~"^(station|halt|subway_entrance)$"](${bbox});`);
-    clauses.push(`  way["railway"~"^(rail|light_rail|subway|tram|narrow_gauge)$"](${bbox});`);
+    clauses.push(
+      `  way["railway"~"^(rail|light_rail|subway|tram|narrow_gauge)$"](${bbox});`
+    );
   }
 
-  return `[out:json][timeout:20];\n(\n${clauses.join('\n')}\n);\nout geom;`;
+  return `[out:json][timeout:25];\n(\n${clauses.join('\n')}\n);\nout geom;`;
 }
 
-export async function fetchOsmAreaData(
+export interface FetchOsmResultWithSource {
+  data: OverpassResponse;
+  endpointUsed: string;
+  sourceLabel: string;
+  matchedCityName?: string;
+}
+
+function classifyHttpError(status: number, endpoint: string): Error {
+  if (status === 429) {
+    return new Error(
+      `Overpass API rate limit reached (HTTP 429) at ${endpoint}. Wait a moment or use a local Overpass container.`
+    );
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return new Error(
+      `Overpass server temporarily unavailable (HTTP ${status}) at ${endpoint}.`
+    );
+  }
+  return new Error(`Overpass request failed with HTTP ${status} at ${endpoint}.`);
+}
+
+function classifyCaughtError(err: unknown, endpoint: string): Error {
+  if (err instanceof DOMException && err.name === 'TimeoutError') {
+    return new Error(
+      `Overpass query timed out after ${Math.round(OVERPASS_TIMEOUT_MS / 1000)}s (${endpoint}). Dense areas work best via a local Docker Overpass instance or a smaller bounding box.`
+    );
+  }
+  if (err instanceof DOMException && err.name === 'AbortError') {
+    return err;
+  }
+  if (err instanceof Error && err.name === 'TimeoutError') {
+    return new Error(
+      `Overpass query timed out after ${Math.round(OVERPASS_TIMEOUT_MS / 1000)}s (${endpoint}).`
+    );
+  }
+  if (err instanceof TypeError) {
+    return new Error(
+      `Network error reaching Overpass endpoint (${endpoint}). Check internet connectivity or local Docker Overpass container status.`
+    );
+  }
+  return err instanceof Error
+    ? err
+    : new Error(`Unexpected error reaching Overpass endpoint (${endpoint}).`);
+}
+
+export async function fetchOsmAreaDataWithSource(
   bounds: GeoBounds,
   categories: OsmImportCategories,
-  signal?: AbortSignal
-): Promise<OverpassResponse> {
+  signal?: AbortSignal,
+  origin?: GeoOrigin
+): Promise<FetchOsmResultWithSource> {
   if (
     !categories.roads &&
     !categories.buildings &&
@@ -236,65 +335,133 @@ export async function fetchOsmAreaData(
     );
   }
 
+  const plan = resolveOverpassDataSource(bounds, origin, {
+    env: readViteEnv(),
+    isDev: isViteDevMode(),
+  });
+
   const cacheKey = JSON.stringify({
     s: bounds.south.toFixed(5),
     w: bounds.west.toFixed(5),
     n: bounds.north.toFixed(5),
     e: bounds.east.toFixed(5),
     categories,
+    city: plan.matchedCity?.id || 'custom',
   });
   if (overpassCache.has(cacheKey)) {
-    return overpassCache.get(cacheKey)!;
+    const cached = overpassCache.get(cacheKey)!;
+    return {
+      data: cached.response,
+      endpointUsed: cached.endpointUsed,
+      sourceLabel: isLocalProxyOrLocalhostUrl(cached.endpointUsed)
+        ? `${plan.matchedCity?.name || 'Local'} Overpass`
+        : 'Public Overpass API',
+      matchedCityName: plan.matchedCity?.name,
+    };
   }
 
-  await respectRateLimit();
   const query = buildOverpassQuery(bounds, categories);
   let lastError: Error | null = null;
 
-  for (const endpoint of OSM_SERVICE_CONFIG.overpassEndpoints) {
-    try {
-      const res = await fetchWithTimeout(
-        endpoint,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            Accept: 'application/json',
+  for (let i = 0; i < plan.endpoints.length; i++) {
+    const endpoint = plan.endpoints[i];
+    const isLocal = isLocalProxyOrLocalhostUrl(endpoint);
+    const hasNextFallback = i < plan.endpoints.length - 1;
+
+    // Local Overpass does not need public-API rate limiting; public endpoints keep polite spacing
+    await respectRateLimit(isLocal);
+
+    // Retry with 2s, 4s, 8s exponential backoff on retryable Overpass server errors (429/502/503/504)
+    // Skip multi-second retry loops on a local dev proxy when a public fallback exists and the local port is down.
+    const maxAttempts = isLocal && hasNextFallback ? 1 : OVERPASS_RETRY_DELAYS_MS.length + 1;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        const res = await fetchWithTimeout(
+          endpoint,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+              Accept: 'application/json',
+            },
+            body: `data=${encodeURIComponent(query)}`,
           },
-          body: `data=${encodeURIComponent(query)}`,
-        },
-        9000,
-        signal
-      );
+          OVERPASS_TIMEOUT_MS,
+          signal
+        );
 
-      if (res.status === 429) {
-        lastError = new Error('Overpass API is busy (rate limit). Trying fallback mirror or retry shortly.');
-        continue;
-      }
-      if (!res.ok) {
-        lastError = new Error(`Overpass request failed (HTTP ${res.status}).`);
-        continue;
-      }
+        if (RETRYABLE_HTTP_STATUSES.has(res.status)) {
+          lastError = classifyHttpError(res.status, endpoint);
+          if (attempt < maxAttempts - 1) {
+            await waitWithAbort(OVERPASS_RETRY_DELAYS_MS[attempt], signal);
+            continue;
+          }
+          break;
+        }
 
-      const data = (await res.json()) as OverpassResponse;
-      if (!data || !Array.isArray(data.elements)) {
-        lastError = new Error('Unexpected response format from OpenStreetMap Overpass API.');
-        continue;
+        if (!res.ok) {
+          lastError = classifyHttpError(res.status, endpoint);
+          break;
+        }
+
+        const data = (await res.json()) as OverpassResponse;
+        if (!data || !Array.isArray(data.elements)) {
+          lastError = new Error(
+            `Unexpected response format from Overpass (${endpoint}).`
+          );
+          break;
+        }
+
+        // If a local partial-dataset proxy returns 0 elements while a public fallback exists,
+        // try the public fallback in case the queried area lies outside the local extract bbox.
+        if (data.elements.length === 0 && isLocal && hasNextFallback) {
+          lastError = new Error(
+            `No features in local extract (${endpoint}); checking public Overpass fallback.`
+          );
+          break;
+        }
+
+        overpassCache.set(cacheKey, { response: data, endpointUsed: endpoint });
+        return {
+          data,
+          endpointUsed: endpoint,
+          sourceLabel: isLocal
+            ? `${plan.matchedCity?.name || 'Local'} Overpass`
+            : 'Public Overpass API',
+          matchedCityName: plan.matchedCity?.name,
+        };
+      } catch (err) {
+        if (signal?.aborted) {
+          throw err;
+        }
+        const classified = classifyCaughtError(err, endpoint);
+        lastError = classified;
+        if (attempt < maxAttempts - 1 && !(err instanceof TypeError && hasNextFallback)) {
+          await waitWithAbort(OVERPASS_RETRY_DELAYS_MS[attempt], signal);
+          continue;
+        }
+        break;
       }
-      overpassCache.set(cacheKey, data);
-      return data;
-    } catch (err) {
-      if (signal?.aborted) {
-        throw err;
-      }
-      lastError =
-        err instanceof Error && err.name === 'AbortError'
-          ? new Error('OpenStreetMap Overpass mirror timed out. Please retry or select a smaller area.')
-          : err instanceof Error
-            ? err
-            : new Error('Network error reaching OpenStreetMap Overpass API.');
     }
   }
 
-  throw lastError || new Error('Unable to fetch OpenStreetMap data right now.');
+  throw (
+    lastError || new Error('Unable to fetch OpenStreetMap data right now.')
+  );
+}
+
+export async function fetchOsmAreaData(
+  bounds: GeoBounds,
+  categories: OsmImportCategories,
+  signal?: AbortSignal,
+  origin?: GeoOrigin
+): Promise<OverpassResponse> {
+  const result = await fetchOsmAreaDataWithSource(
+    bounds,
+    categories,
+    signal,
+    origin
+  );
+  return result.data;
 }

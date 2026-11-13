@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  CITY_CATALOG,
+  DEFAULT_PUBLIC_OVERPASS_URL,
+  findCatalogCityForBounds,
+  resolveOverpassDataSource,
+} from '../data/cityCatalog';
+import {
+  OVERPASS_RETRY_DELAYS_MS,
+  OVERPASS_TIMEOUT_MS,
+  RETRYABLE_HTTP_STATUSES,
+} from '../services/osmService';
+import {
   createBlankCity,
   createRealWorldCity,
   createSampleCity,
@@ -496,3 +507,80 @@ test('convertOverpassToCityEntities converts OSM roads, polygon buildings, parks
   assert.equal(parsed?.geoOrigin?.label, 'Teresina');
   assert.equal(parsed?.importedBounds?.length, 1);
 });
+
+test('multi-city catalog contains New York and Teresina with independent data sources and metadata', () => {
+  const nyc = CITY_CATALOG.find((c) => c.id === 'new-york');
+  const teresina = CITY_CATALOG.find((c) => c.id === 'teresina');
+  assert.ok(nyc);
+  assert.ok(teresina);
+  assert.equal(nyc?.availability, 'local_and_public');
+  assert.equal(teresina?.availability, 'local_and_public');
+  assert.ok(nyc?.dataSource.localProxyPath === '/overpass/api/interpreter');
+  assert.ok(teresina?.dataSource.localProxyPath === '/overpass-teresina/api/interpreter');
+  assert.ok(nyc?.datasetUpdatedAt);
+  assert.ok(teresina?.datasetUpdatedAt);
+});
+
+test('resolveOverpassDataSource routes New York and Teresina independently in dev and safely falls back in production', () => {
+  const nycBounds = createDefaultBoundsAround(40.758, -73.9855, 350);
+  const teresinaBounds = createDefaultBoundsAround(-5.0892, -42.8016, 350);
+  const spBounds = createDefaultBoundsAround(-23.5505, -46.6333, 350);
+
+  assert.equal(findCatalogCityForBounds(nycBounds)?.id, 'new-york');
+  assert.equal(findCatalogCityForBounds(teresinaBounds)?.id, 'teresina');
+
+  // Claude's .env.local setting (VITE_OVERPASS_URL="/overpass/api/interpreter")
+  const devEnv = { VITE_OVERPASS_URL: '/overpass/api/interpreter' };
+
+  const nycPlan = resolveOverpassDataSource(
+    nycBounds,
+    { lat: 40.758, lon: -73.9855, label: 'New York', cityCatalogId: 'new-york' },
+    { env: devEnv, isDev: true }
+  );
+  assert.deepEqual(nycPlan.endpoints, [
+    '/overpass/api/interpreter',
+    DEFAULT_PUBLIC_OVERPASS_URL,
+  ]);
+  assert.equal(nycPlan.hasLocalSource, true);
+
+  // Teresina must NOT be routed to NYC's /overpass container; it routes to /overpass-teresina + public fallback
+  const teresinaPlan = resolveOverpassDataSource(
+    teresinaBounds,
+    { lat: -5.0892, lon: -42.8016, label: 'Teresina', cityCatalogId: 'teresina' },
+    { env: devEnv, isDev: true }
+  );
+  assert.deepEqual(teresinaPlan.endpoints, [
+    '/overpass-teresina/api/interpreter',
+    DEFAULT_PUBLIC_OVERPASS_URL,
+  ]);
+  assert.equal(teresinaPlan.hasLocalSource, true);
+
+  // Production build with no local env vars never hits localhost/dev proxy
+  const prodTeresina = resolveOverpassDataSource(
+    teresinaBounds,
+    { lat: -5.0892, lon: -42.8016, label: 'Teresina', cityCatalogId: 'teresina' },
+    { env: {}, isDev: false }
+  );
+  assert.deepEqual(prodTeresina.endpoints, [DEFAULT_PUBLIC_OVERPASS_URL]);
+  assert.equal(prodTeresina.hasLocalSource, false);
+
+  // Custom hosted Overpass backend in production works for all cities
+  const prodHosted = resolveOverpassDataSource(
+    spBounds,
+    { lat: -23.5505, lon: -46.6333, label: 'São Paulo', cityCatalogId: 'sao-paulo' },
+    { env: { VITE_OVERPASS_URL: 'https://overpass.example.org/api/interpreter' }, isDev: false }
+  );
+  assert.deepEqual(prodHosted.endpoints, [
+    'https://overpass.example.org/api/interpreter',
+    DEFAULT_PUBLIC_OVERPASS_URL,
+  ]);
+
+  // Verify Claude's Overpass timeout (30s) and exponential backoff (2s, 4s, 8s) constants are preserved
+  assert.equal(OVERPASS_TIMEOUT_MS, 30_000);
+  assert.deepEqual([...OVERPASS_RETRY_DELAYS_MS], [2000, 4000, 8000]);
+  assert.equal(RETRYABLE_HTTP_STATUSES.has(429), true);
+  assert.equal(RETRYABLE_HTTP_STATUSES.has(502), true);
+  assert.equal(RETRYABLE_HTTP_STATUSES.has(503), true);
+  assert.equal(RETRYABLE_HTTP_STATUSES.has(504), true);
+});
+

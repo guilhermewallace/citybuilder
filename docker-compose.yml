@@ -1,0 +1,43 @@
+services:
+  # Teresina, Brazil local Overpass instance (isolated from existing overpass_nyc)
+  # Prerequisite: run ./scripts/extract-city-osm.sh teresina to generate ./docker/data/teresina.osm.pbf
+  overpass_teresina:
+    image: wiktorn/overpass-api:latest
+    container_name: overpass_teresina
+    restart: unless-stopped
+    ports:
+      - "12346:80"
+    environment:
+      OVERPASS_META: "no"
+      OVERPASS_MODE: "init"
+      OVERPASS_PLANET_URL: "file:///data/teresina.osm.pbf"
+      OVERPASS_RULES_LOAD: "10"
+      OVERPASS_USE_AREAS: "false"
+      OVERPASS_STOP_AFTER_INIT: "false"
+    volumes:
+      - overpass_teresina_data:/db
+      - ./docker/data:/data:ro
+
+  # Optional fresh New York service ONLY for new machines without an existing overpass_nyc container.
+  # Kept behind a profile so `docker compose up -d` never touches or replaces your existing overpass_nyc!
+  overpass_nyc_fresh:
+    profiles: ["nyc-fresh"]
+    image: wiktorn/overpass-api:latest
+    container_name: overpass_nyc
+    restart: unless-stopped
+    ports:
+      - "12345:80"
+    environment:
+      OVERPASS_META: "no"
+      OVERPASS_MODE: "init"
+      OVERPASS_PLANET_URL: "file:///data/new-york.osm.pbf"
+      OVERPASS_RULES_LOAD: "10"
+      OVERPASS_USE_AREAS: "false"
+      OVERPASS_STOP_AFTER_INIT: "false"
+    volumes:
+      - overpass_nyc_data:/db
+      - ./docker/data:/data:ro
+
+volumes:
+  overpass_teresina_data:
+  overpass_nyc_data:

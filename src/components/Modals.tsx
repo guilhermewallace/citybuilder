@@ -13,12 +13,12 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+import { CITY_CATALOG } from '../data/cityCatalog';
 import {
   LocationSearchResult,
-  PRESET_CITIES,
   searchOsmLocations,
 } from '../services/osmService';
-import { CityData, GeoOrigin } from '../types/city';
+import { CityCatalogEntry, CityData, GeoOrigin } from '../types/city';
 import {
   encodeCityToShareHash,
   exportCityAsJsonString,
@@ -46,11 +46,23 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [modeTab, setModeTab] = useState<'blank' | 'real'>('blank');
   const [cityName, setCityName] = useState('New Metropolis');
 
+  const catalogAsResults: LocationSearchResult[] = CITY_CATALOG.map((c) => ({
+    placeId: `catalog-${c.id}`,
+    name: c.name,
+    displayName: c.displayName,
+    lat: c.center.lat,
+    lon: c.center.lon,
+    type: c.availability === 'local_and_public' ? 'Local + Public' : 'Public OSM',
+    country: c.country,
+    boundingBox: c.bounds,
+    cityCatalogId: c.id,
+  }));
+
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
   const [hasSearched, setHasSearched] = useState(false);
-  const [results, setResults] = useState<LocationSearchResult[]>(PRESET_CITIES);
+  const [results, setResults] = useState<LocationSearchResult[]>(catalogAsResults);
   const [selectedLoc, setSelectedLoc] = useState<LocationSearchResult | null>(
     null
   );
@@ -58,10 +70,17 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
 
   if (!open) return null;
 
+  const formatAvailabilityLabel = (c: CityCatalogEntry) =>
+    c.availability === 'local_and_public'
+      ? `Local + Public · ${c.datasetUpdatedAt}`
+      : c.availability === 'local_only'
+        ? `Local dataset · ${c.datasetUpdatedAt}`
+        : c.datasetUpdatedAt;
+
   const runSearch = async (term: string) => {
     const trimmed = term.trim();
     if (!trimmed) {
-      setResults(PRESET_CITIES);
+      setResults(catalogAsResults);
       setHasSearched(false);
       setSearchError('');
       return;
@@ -234,19 +253,71 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             </div>
           </div>
         ) : (
-          <div className="p-5 space-y-4">
+          <div className="p-5 space-y-3.5 max-h-[76vh] overflow-y-auto custom-scrollbar">
+            {/* Supported Cities Catalog */}
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium text-slate-600">
+                  Supported cities catalog
+                </span>
+                <span className="text-[11px] text-slate-400">
+                  Auto-selects data source
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                {CITY_CATALOG.map((cityEntry) => {
+                  const isSel = selectedLoc?.cityCatalogId === cityEntry.id;
+                  return (
+                    <button
+                      key={cityEntry.id}
+                      type="button"
+                      onClick={() => {
+                        setQuery(cityEntry.displayName);
+                        handleSelectLocation({
+                          placeId: `catalog-${cityEntry.id}`,
+                          name: cityEntry.name,
+                          displayName: cityEntry.displayName,
+                          lat: cityEntry.center.lat,
+                          lon: cityEntry.center.lon,
+                          type:
+                            cityEntry.availability === 'local_and_public'
+                              ? 'Local + Public'
+                              : 'Public OSM',
+                          country: cityEntry.country,
+                          boundingBox: cityEntry.bounds,
+                          cityCatalogId: cityEntry.id,
+                        });
+                      }}
+                      className={`px-2.5 py-2 rounded-lg border text-left transition-colors cursor-pointer ${
+                        isSel
+                          ? 'bg-blue-50/80 border-blue-400 text-slate-900'
+                          : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-800'
+                      }`}
+                    >
+                      <p className="text-xs font-semibold truncate">
+                        {cityEntry.displayName}
+                      </p>
+                      <p className="text-[10px] text-slate-500 mt-0.5 truncate">
+                        {formatAvailabilityLabel(cityEntry)}
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
             <form
               onSubmit={(e) => {
                 e.preventDefault();
                 runSearch(query);
               }}
-              className="space-y-2"
+              className="space-y-1.5 pt-2 border-t border-slate-100"
             >
               <label
                 htmlFor="osm-location-search"
                 className="block text-xs font-medium text-slate-600"
               >
-                Search city, neighborhood, or street address
+                Or search any city, neighborhood, or street address
               </label>
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
@@ -256,7 +327,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                     type="text"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
-                    placeholder="e.g. Teresina, Brazil or Manhattan, New York"
+                    placeholder="e.g. Midtown Manhattan or Teresina, Brazil"
                     className="w-full pl-8 pr-3 py-2 text-sm border border-slate-200 rounded-lg focus:border-blue-500 outline-none"
                   />
                 </div>
@@ -275,28 +346,6 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
               </div>
             </form>
 
-            {/* Quick Example Locations */}
-            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-              <span className="text-slate-500 mr-0.5">Examples:</span>
-              {PRESET_CITIES.map((preset) => (
-                <button
-                  key={preset.placeId}
-                  type="button"
-                  onClick={() => {
-                    setQuery(`${preset.name}, ${preset.country || ''}`.trim());
-                    handleSelectLocation(preset);
-                  }}
-                  className={`px-2 py-0.5 rounded border transition-colors cursor-pointer ${
-                    selectedLoc?.placeId === preset.placeId
-                      ? 'bg-blue-50 border-blue-300 text-blue-700 font-medium'
-                      : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
-                  }`}
-                >
-                  {preset.name}, {preset.country === 'United States' ? 'New York' : preset.country}
-                </button>
-              ))}
-            </div>
-
             {searchError && (
               <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">
                 {searchError}
@@ -304,53 +353,53 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
             )}
 
             {/* Search Results */}
-            <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-48 overflow-y-auto custom-scrollbar">
-              {results.length === 0 ? (
-                <div className="px-3.5 py-5 text-center text-xs text-slate-500">
-                  {hasSearched
-                    ? 'No matching locations found. Try another city, neighborhood, or address.'
-                    : 'Enter a location above to search OpenStreetMap.'}
-                </div>
-              ) : (
-                results.map((loc) => {
-                  const isSel = selectedLoc?.placeId === loc.placeId;
-                  return (
-                    <button
-                      key={loc.placeId}
-                      type="button"
-                      onClick={() => handleSelectLocation(loc)}
-                      className={`w-full px-3.5 py-2.5 flex items-start justify-between gap-2 text-left transition-colors cursor-pointer ${
-                        isSel ? 'bg-blue-50/70' : 'hover:bg-slate-50'
-                      }`}
-                    >
-                      <div className="flex items-start gap-2.5 min-w-0">
-                        <MapPin
-                          className={`w-4 h-4 mt-0.5 shrink-0 ${
-                            isSel ? 'text-blue-600' : 'text-slate-400'
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <p className="text-xs font-semibold text-slate-900 truncate">
-                            {loc.name}
-                          </p>
-                          <p className="text-[11px] text-slate-500 truncate">
-                            {loc.displayName}
-                          </p>
+            {hasSearched && (
+              <div className="border border-slate-200 rounded-lg divide-y divide-slate-100 max-h-40 overflow-y-auto custom-scrollbar">
+                {results.length === 0 ? (
+                  <div className="px-3.5 py-4 text-center text-xs text-slate-500">
+                    No matching locations found. Try another city, neighborhood, or address.
+                  </div>
+                ) : (
+                  results.map((loc) => {
+                    const isSel = selectedLoc?.placeId === loc.placeId;
+                    return (
+                      <button
+                        key={loc.placeId}
+                        type="button"
+                        onClick={() => handleSelectLocation(loc)}
+                        className={`w-full px-3.5 py-2 flex items-start justify-between gap-2 text-left transition-colors cursor-pointer ${
+                          isSel ? 'bg-blue-50/70' : 'hover:bg-slate-50'
+                        }`}
+                      >
+                        <div className="flex items-start gap-2.5 min-w-0">
+                          <MapPin
+                            className={`w-4 h-4 mt-0.5 shrink-0 ${
+                              isSel ? 'text-blue-600' : 'text-slate-400'
+                            }`}
+                          />
+                          <div className="min-w-0">
+                            <p className="text-xs font-semibold text-slate-900 truncate">
+                              {loc.name}
+                            </p>
+                            <p className="text-[11px] text-slate-500 truncate">
+                              {loc.displayName}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <span className="text-[10px] font-medium text-slate-500 capitalize block">
-                          {loc.type}
-                        </span>
-                        <span className="text-[10px] font-mono-tabular text-slate-400">
-                          {loc.lat.toFixed(3)}, {loc.lon.toFixed(3)}
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
+                        <div className="text-right shrink-0">
+                          <span className="text-[10px] font-medium text-slate-500 capitalize block">
+                            {loc.type}
+                          </span>
+                          <span className="text-[10px] font-mono-tabular text-slate-400">
+                            {loc.lat.toFixed(3)}, {loc.lon.toFixed(3)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
 
             {selectedLoc && (
               <div className="pt-2 border-t border-slate-100 flex items-end gap-2">
@@ -379,6 +428,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                         lon: selectedLoc.lon,
                         label: selectedLoc.name,
                         displayName: selectedLoc.displayName,
+                        cityCatalogId: selectedLoc.cityCatalogId,
                       },
                       realProjectName.trim() || selectedLoc.name
                     );

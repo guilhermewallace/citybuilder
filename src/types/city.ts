@@ -34,6 +34,39 @@ export interface GeoOrigin {
   lon: number;
   label: string;
   displayName?: string;
+  cityCatalogId?: string;
+}
+
+export type CityAvailabilityStatus =
+  | 'local_and_public'
+  | 'local_only'
+  | 'public_only'
+  | 'planned';
+
+export interface CityDataSourceConfig {
+  /** Development Vite proxy path (e.g. '/overpass/api/interpreter') */
+  localProxyPath?: string;
+  /** Optional per-city Vite environment variable override name */
+  envVarName?: string;
+  /** Public Overpass fallback endpoint */
+  publicFallbackUrl: string;
+  /** Official Geofabrik extract URL used to build the local Overpass dataset */
+  geofabrikExtractUrl?: string;
+  /** Osmium extract bounding box string: minLon,minLat,maxLon,maxLat */
+  extractBbox?: string;
+}
+
+export interface CityCatalogEntry {
+  id: string;
+  name: string;
+  country: string;
+  displayName: string;
+  center: GeoPoint;
+  bounds: GeoBounds;
+  dataSource: CityDataSourceConfig;
+  availability: CityAvailabilityStatus;
+  datasetUpdatedAt: string;
+  estimatedElementsHint?: string;
 }
 
 export interface OsmImportCategories {

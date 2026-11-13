@@ -24,7 +24,11 @@ import {
   TRANSIT_STATION_CONFIG,
   ZONE_CONFIG,
 } from '../data/catalog';
-import { fetchOsmAreaData, OSM_SERVICE_CONFIG } from '../services/osmService';
+import { resolveOverpassDataSource } from '../data/cityCatalog';
+import {
+  fetchOsmAreaDataWithSource,
+  OSM_SERVICE_CONFIG,
+} from '../services/osmService';
 import {
   ActiveTool,
   BuildingItem,
@@ -219,6 +223,16 @@ export const CityCanvas: React.FC<CityCanvasProps> = ({
     [selectionBounds]
   );
 
+  const resolvedSource = useMemo(() => {
+    if (!selectionBounds) return null;
+    const metaEnv =
+      (import.meta.env as unknown as Record<string, string | undefined>) || {};
+    return resolveOverpassDataSource(selectionBounds, city.geoOrigin, {
+      env: metaEnv,
+      isDev: Boolean((import.meta.env as unknown as { DEV?: boolean })?.DEV),
+    });
+  }, [city.geoOrigin, selectionBounds]);
+
   const handleUseVisibleArea = useCallback(() => {
     if (!city.geoOrigin) return;
     const wCenter = { x: camera.x, y: camera.y };
@@ -248,10 +262,15 @@ export const CityCanvas: React.FC<CityCanvasProps> = ({
     setImportingOsm(true);
     setImportError('');
     try {
-      const response = await fetchOsmAreaData(selectionBounds, importCategories);
+      const result = await fetchOsmAreaDataWithSource(
+        selectionBounds,
+        importCategories,
+        undefined,
+        city.geoOrigin
+      );
       const existingIds = collectExistingOsmIds(city);
       const converted = convertOverpassToCityEntities(
-        response,
+        result.data,
         city.geoOrigin,
         importCategories,
         existingIds
@@ -266,7 +285,7 @@ export const CityCanvas: React.FC<CityCanvasProps> = ({
       onAreaSelectModeChange(false);
       setDrawingSelectionBox(false);
       setImportToast(
-        `Imported ${converted.counts.roads} roads, ${converted.counts.buildings} buildings, ${converted.counts.publicSpaces + converted.counts.water} parks/water, ${converted.counts.stations + converted.counts.routes} transit items`
+        `Imported ${converted.counts.roads} roads, ${converted.counts.buildings} buildings, ${converted.counts.publicSpaces + converted.counts.water} parks/water, ${converted.counts.stations + converted.counts.routes} transit items · ${result.sourceLabel}`
       );
       setTimeout(() => setImportToast(''), 5500);
     } catch (err) {
@@ -1490,6 +1509,18 @@ export const CityCanvas: React.FC<CityCanvasProps> = ({
               ))}
             </div>
           </div>
+
+          {resolvedSource && (
+            <div
+              data-testid="osm-source-indicator"
+              className="text-[11px] text-slate-500 flex items-center justify-between gap-2 pt-0.5"
+            >
+              <span className="shrink-0 whitespace-nowrap">Source</span>
+              <span className="font-medium text-slate-700 truncate text-right">
+                {resolvedSource.sourceLabel}
+              </span>
+            </div>
+          )}
 
           {importError && (
             <div className="flex items-start gap-2 px-2.5 py-2 rounded-md bg-red-50 border border-red-200 text-[11px] text-red-700">
